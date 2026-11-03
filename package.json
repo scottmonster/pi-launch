@@ -1,0 +1,11 @@
+{
+  "name": "pi-launch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A PATH wrapper for Pi with comment-preserving JSONC settings",
+  "bin": { "pi": "./bin/pi.mjs", "pi-launch": "./bin/pi.mjs" },
+  "scripts": { "test": "node --test", "install-user": "node scripts/install-user.mjs" },
+  "dependencies": { "jsonc-parser": "^3.3.1" },
+  "engines": { "node": ">=22.15.0" }
+}
