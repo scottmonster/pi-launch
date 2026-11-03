@@ -39,10 +39,6 @@ export function findPiRoot(executable) {
 }
 
 export function assertCompatible({ root, version }) {
-  // Fail closed outside the supported adapter family rather than ignoring settings.
-  if (!/^1\.4\.\d+$/.test(version)) {
-    throw new Error(`Pi ${version} is unsupported by this adapter (supported: 1.4.x; tested: 1.4.0). Update pi-launch before using commented settings with this version.`);
-  }
   for (const relative of ['dist/cli.js', 'dist/core/settings-manager.js']) {
     try { accessSync(join(root, relative), constants.R_OK); }
     catch { throw new Error(`Pi ${version} is missing ${relative}; an unbundled npm installation is required.`); }

@@ -6,8 +6,10 @@ JSONC settings. This directory is an independent Git repository, not a Pi extens
 ## Install
 
 Requires Linux/macOS, Node **22.15+** (with `process.execve`), and an npm installation
-of `@earendil-works/pi-coding-agent`. Currently supports Pi **1.4.x**, tested against
-**1.4.0**. Standalone Pi binaries and arbitrary shell shims are not supported.
+of `@earendil-works/pi-coding-agent`. Compatibility is checked by behavior, not
+by a version allowlist. Tested against actual Pi **1.4.0** and simulated compatible
+and incompatible **1.5.0** updates. Standalone Pi binaries and arbitrary shell
+shims are not supported.
 
 ```sh
 cd /home/scott/Documents/mipi/utils/pi-launch
@@ -72,11 +74,13 @@ PI_LAUNCH_REAL_PI=/path/to/node/bin/pi pi --version
 Do not point that override at the wrapper. There is no implicit fallback to a
 second Pi installation if the first real executable is incompatible.
 
-The wrapper uses `execve`, not a child-process proxy. Arguments, environment,
+Normal runs use `execve`, not a child-process proxy. Arguments, environment,
 working directory, stdin/stdout/stderr, terminal access, signals and exit status
-are inherited directly. It starts Pi's **unbundled CLI** after installing the
-settings adapter, rather than executing its default bundled entry point. Direct
-SDK imports or another application's embedded/bundled Pi are not patched.
+are inherited directly. Update commands are supervised with inherited stdio and
+signal forwarding so the launcher can verify the installation afterward.
+It starts Pi's **unbundled CLI** after installing the settings adapter, rather
+than executing its default bundled entry point. Direct SDK imports or another
+application's embedded/bundled Pi are not patched.
 
 ## Updates and compatibility
 
@@ -85,16 +89,49 @@ do not overwrite them. New launches rediscover the current Pi installation.
 Normal Pi update/install/configuration commands still work through the wrapper.
 If a Node-version switch changes PATH order, ensure `~/.local/bin` is first again.
 
-Comment support still depends on Pi internals: the adapter supports the 1.4.x
-family and checks the required modules/API shape. Unsupported versions **stop
-with an error**, never silently fall back to ignoring settings or removing
-comments. Patch releases are allowed but are not all individually tested.
-After updating Pi, run `npm test` here; it includes a real installed-Pi settings
-read/write integration check in a temporary directory.
+### Automatic compatibility verification
 
-Update this repository separately (`git pull`, then `npm ci` and `npm test`) when
-a newer adapter becomes available. Native JSONC support upstream remains the
-long-term way to eliminate this internal dependency.
+On every launch, the wrapper fingerprints the Pi npm package metadata and its
+JavaScript/JSON distribution files, the launcher adapter/probe sources and lockfile,
+and the Node runtime identity. A changed installation is tested in a separate,
+offline Node process with disposable HOME, agent, and project directories.
+The probe checks:
+
+- Global and trusted-project settings with comments and trailing commas load.
+- Untrusted project settings are not applied.
+- Reading doesn't rewrite settings.
+- Top-level, nested, and project-setting writes preserve comments and other values.
+- Saved values reload correctly, with no settings errors reported by Pi.
+
+Successful checks are cached atomically in
+`${XDG_CACHE_HOME:-~/.cache}/pi-launch/verified/` (override with
+`PI_LAUNCH_CACHE_DIR`). Cache misses, damaged records, and adapter changes trigger
+a fresh check. Failed checks are never cached as successes. An unwritable cache
+means the successful check repeats next time. Diagnostics go to stderr, never
+stdout, preserving JSON/RPC output. Delete the cache directory to force retesting.
+
+For `pi update ...`, the current installation must first pass as usual. The
+launcher lets the update command run, then rediscovers and checks the resulting
+installation—even if the command returned a nonzero status. The update's exit
+code is retained. If verification fails after a successful update, that command
+still exits 0 but prints a prominent diagnostic; subsequent normal launches are
+blocked. Interrupted updates are rechecked on the next launch. Updates outside
+this wrapper (e.g. npm or another terminal) are also detected on the next launch.
+
+A compatible Pi 1.5 or later is accepted automatically. An incompatible one
+**stops with an error** before starting the normal CLI. There is no automatic
+rollback, no version allowlist to edit, and no silent fallback to ignoring settings
+or removing comments. The check does not modify your real settings or install an
+update by itself. It tests the settings integration, not every Pi feature; changes
+to external dependencies without changes to Pi's distribution or the runtime may
+require clearing the cache manually.
+
+If compatibility fails, update this repository separately (`git pull`, then
+`npm ci` and `npm test`) when a fix is available, or use your external package
+manager to restore a known-working Pi installation. Wrapper commands—including
+another `pi update`—remain blocked while the installed settings API is broken.
+Native JSONC support upstream remains the long-term way to eliminate this
+internal dependency.
 
 Invalid JSONC is reported as an error; the adapter does not repair files or
 strip and restore comments on disk. Existing Pi file locks, merging, and trust
@@ -108,7 +145,9 @@ npm test
 
 Tests cover JSONC parsing and preservation, invalid input, nested edits, no-op
 writes, recursion prevention, compatibility errors, argument/environment/stdio
-forwarding, working directory, exit status, signals, and actual Pi storage.
+forwarding, working directory, exit status, signals, actual Pi storage, behavior
+probes, cache invalidation, and successful/failed simulated updates. No real Pi
+update is performed by the tests.
 
 ## Uninstall
 
