@@ -4,13 +4,13 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { assertCompatible } from './launcher.mjs';
+import { assertCompatible, scriptArgs } from './launcher.mjs';
 
 const ownRoot = fileURLToPath(new URL('.', import.meta.url));
 
 export function installationFingerprint({ root }) {
   const hash = createHash('sha256');
-  hash.update(JSON.stringify({ schema: 1, root: realpathSync(root), node: process.version, executable: process.execPath, platform: process.platform, arch: process.arch }));
+  hash.update(JSON.stringify({ schema: 1, root: realpathSync(root), runtime: process.versions.bun ?? process.version, executable: process.execPath, platform: process.platform, arch: process.arch }));
   function add(path, label) {
     hash.update(label + '\0');
     hash.update(readFileSync(path));
@@ -26,7 +26,7 @@ export function installationFingerprint({ root }) {
     }
   }
   walk(join(root, 'dist'), 'pi/dist');
-  for (const name of ['adapter.mjs', 'settings-comments.mjs', 'probe.mjs', 'bootstrap.mjs', 'compatibility.mjs', 'launcher.mjs', 'package-lock.json']) {
+  for (const name of ['adapter.mjs', 'settings-comments.mjs', 'probe.mjs', 'bootstrap.mjs', 'compatibility.mjs', 'launcher.mjs', 'bun.lock']) {
     add(join(ownRoot, name), `launcher/${name}`);
   }
   return hash.digest('hex');
@@ -46,7 +46,7 @@ export function ensureCompatible(installation, {
   report(`checking settings compatibility with Pi ${installation.version}…`);
   const scratch = mkdtempSync(join(tmpdir(), 'pi-launch-probe-'));
   try {
-    const result = spawnSync(process.execPath, [join(ownRoot, 'probe.mjs'), installation.root, scratch], {
+    const result = spawnSync(process.execPath, scriptArgs(join(ownRoot, 'probe.mjs'), installation.root, scratch), {
       cwd: scratch,
       env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: join(scratch, 'config'), XDG_CACHE_HOME: join(scratch, 'cache'), PI_CODING_AGENT_DIR: join(scratch, 'agent'), PI_OFFLINE: '1' },
       input: '', encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024,

@@ -1,37 +1,51 @@
 #!/bin/sh
 # Install, update, or uninstall pi-launch.
-#   Install / update: curl -fsSL https://raw.githubusercontent.com/scottmonster/pi-launch/HEAD/install.sh | sh
-#   Uninstall:        curl -fsSL https://raw.githubusercontent.com/scottmonster/pi-launch/HEAD/install.sh | sh -s -- --uninstall
+#   Install:   curl -fsSL https://raw.githubusercontent.com/scottmonster/pi-launch/HEAD/install.sh | sh
+#   Update:    pi launch update      (or: pi-launch --update)
+#   Uninstall: pi launch uninstall   (or: pi-launch --uninstall)
 # Extra arguments are passed to the installer/uninstaller (e.g. --keep-other-pi, --no-restore).
 set -eu
 
-repo="${PI_LAUNCH_REPO:-https://github.com/scottmonster/pi-launch.git}"
-dir="${PI_LAUNCH_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-launch/src}"
+# Wrapped in a function so sh parses the whole file before `git pull` can change it.
+main() {
+  repo="${PI_LAUNCH_REPO:-https://github.com/scottmonster/pi-launch.git}"
+  managed="${XDG_DATA_HOME:-$HOME/.local/share}/pi-launch/src"
+  dir="${PI_LAUNCH_DIR:-$managed}"
+  PATH="$PATH:$HOME/.bun/bin"
+
+  for tool in git bun; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool is required (Bun: https://bun.sh)"
+  done
+  bun -e 'process.exit(typeof process.execve === "function" ? 0 : 1)' ||
+    fail "Bun 1.3+ is required (found $(bun --version)); run: bun upgrade"
+
+  if [ "${1:-}" = "--uninstall" ]; then
+    shift
+    [ -d "$dir" ] || fail "no pi-launch checkout at $dir"
+    bun "$dir/scripts/uninstall-user.mjs" "$@"
+    # Only delete the standard install checkout, never a development clone.
+    if [ -d "$managed" ] && [ "$(cd "$dir" && pwd -P)" = "$(cd "$managed" && pwd -P)" ]; then
+      rm -rf "$dir"
+      rmdir "$(dirname "$dir")" 2>/dev/null || true
+    else
+      echo "Kept development checkout $dir"
+    fi
+    return
+  fi
+
+  if [ -d "$dir/.git" ]; then
+    echo "Updating pi-launch in $dir"
+    git -C "$dir" pull --ff-only --quiet
+  else
+    echo "Installing pi-launch into $dir"
+    mkdir -p "$(dirname "$dir")"
+    git clone --quiet --depth 1 "$repo" "$dir"
+  fi
+  cd "$dir"
+  bun install --frozen-lockfile --production --ignore-scripts --silent
+  bun scripts/install-user.mjs "$@"
+}
 
 fail() { echo "pi-launch: $*" >&2; exit 1; }
-for tool in git node npm; do
-  command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
-done
-node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 15) ? 0 : 1)' ||
-  fail "Node 22.15+ is required (found $(node --version))"
 
-if [ "${1:-}" = "--uninstall" ]; then
-  shift
-  [ -d "$dir" ] || fail "no pi-launch checkout at $dir"
-  node "$dir/scripts/uninstall-user.mjs" "$@"
-  rm -rf "$dir"
-  rmdir "$(dirname "$dir")" 2>/dev/null || true
-  exit 0
-fi
-
-if [ -d "$dir/.git" ]; then
-  echo "Updating pi-launch in $dir"
-  git -C "$dir" pull --ff-only --quiet
-else
-  echo "Installing pi-launch into $dir"
-  mkdir -p "$(dirname "$dir")"
-  git clone --quiet --depth 1 "$repo" "$dir"
-fi
-cd "$dir"
-npm ci --omit=dev --no-audit --no-fund --loglevel=error
-node scripts/install-user.mjs "$@"
+main "$@"

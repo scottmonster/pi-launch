@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { assertCompatible, findOtherPis, findPiRoot, findRealPi, isPiLaunch, shimMarker, wrapperPath } from '../launcher.mjs';
+import { assertCompatible, findOtherPis, findPiRoot, findRealPi, isPiLaunch, scriptArgs, shimMarker, shimScript, wrapperPath } from '../launcher.mjs';
 import { installSettingsComments } from '../settings-comments.mjs';
 import { ensureCompatible, installationFingerprint } from '../compatibility.mjs';
 
@@ -19,6 +19,9 @@ function fixture(t) {
   writeFileSync(executable, '#!/usr/bin/env node\n');
   chmodSync(executable, 0o755);
   writeFileSync(join(root, 'dist/core/settings-manager.js'), readFileSync(new URL('../fixtures/mock-settings.mjs', import.meta.url)));
+  // Like Pi, the Bun entry point just loads the shared CLI.
+  mkdirSync(join(root, 'dist/bun'));
+  writeFileSync(join(root, 'dist/bun/cli.js'), "import '../cli.js';\n");
   return { root, executable };
 }
 
@@ -82,7 +85,7 @@ test('broken settings API blocks startup and is never cached as verified', t => 
   const { root, executable } = fixture(t);
   writeFileSync(join(root, 'dist/core/settings-manager.js'), 'export class FileSettingsStorage {}');
   writeFileSync(executable, "console.log('SHOULD NOT RUN');");
-  const result = spawnSync(process.execPath, [wrapperPath], {
+  const result = spawnSync(process.execPath, scriptArgs(wrapperPath), {
     encoding: 'utf8', env: { ...process.env, PI_LAUNCH_REAL_PI: executable, PI_LAUNCH_CACHE_DIR: join(root, 'cache') },
   });
   assert.equal(result.status, 1);
@@ -96,7 +99,7 @@ test('forwards arguments, stdin, stdout, stderr, environment, cwd and exit statu
   writeFileSync(executable, `import {readFileSync} from 'node:fs';
 console.log(JSON.stringify({args:process.argv.slice(2),input:readFileSync(0,'utf8'),env:process.env.TEST_FORWARD,cwd:process.cwd()}));
 console.error('stderr forwarded'); process.exitCode=17;`);
-  const result = spawnSync(process.execPath, [wrapperPath, '--', 'a b', '', '--print'], {
+  const result = spawnSync(process.execPath, scriptArgs(wrapperPath, '--', 'a b', '', '--print'), {
     cwd: root, input: 'hello\n', encoding: 'utf8',
     env: { ...process.env, PI_LAUNCH_REAL_PI: executable, PI_LAUNCH_CACHE_DIR: join(root, 'cache'), TEST_FORWARD: 'preserved' },
   });
@@ -108,7 +111,7 @@ console.error('stderr forwarded'); process.exitCode=17;`);
 test('signals reach the exec-replaced Pi process', { timeout: 10000 }, async t => {
   const { root, executable } = fixture(t);
   writeFileSync(executable, "console.log('ready'); setInterval(() => {}, 1000);");
-  const child = spawn(process.execPath, [wrapperPath], { env: { ...process.env, PI_LAUNCH_REAL_PI: executable, PI_LAUNCH_CACHE_DIR: join(root, 'cache') }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, scriptArgs(wrapperPath), { env: { ...process.env, PI_LAUNCH_REAL_PI: executable, PI_LAUNCH_CACHE_DIR: join(root, 'cache') }, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
   const exit = once(child, 'exit');
   await once(child.stdout, 'data');
@@ -129,12 +132,12 @@ if(process.argv[2]==='update') {
   console.log('update ran'); process.exitCode=${status};
 } else { console.log('normal launch'); }`);
     const options = { encoding: 'utf8', env: { ...process.env, PI_LAUNCH_REAL_PI: executable, PI_LAUNCH_CACHE_DIR: join(root, 'cache') } };
-    const result = spawnSync(process.execPath, [wrapperPath, 'update', '--self'], options);
+    const result = spawnSync(process.execPath, scriptArgs(wrapperPath, 'update', '--self'), options);
     assert.equal(result.status, status, result.stderr);
     assert.equal(result.stdout, 'update ran\n');
     assert.match(result.stderr, /checking settings compatibility with Pi 1\.5\.0/);
     assert.match(result.stderr, broken ? /post-update verification failed/ : /verified for Pi 1\.5\.0/);
-    const next = spawnSync(process.execPath, [wrapperPath, '--version'], options);
+    const next = spawnSync(process.execPath, scriptArgs(wrapperPath, '--version'), options);
     assert.equal(next.status, broken ? 1 : 0, next.stderr);
     assert.equal(next.stdout, broken ? '' : 'normal launch\n');
     if (!broken) assert.equal(next.stderr, '');
@@ -144,7 +147,7 @@ if(process.argv[2]==='update') {
 test('update supervisor preserves termination signals', { timeout: 10000 }, async t => {
   const { root, executable } = fixture(t);
   writeFileSync(executable, "console.log('updating'); setInterval(() => {}, 1000);");
-  const child = spawn(process.execPath, [wrapperPath, 'update'], {
+  const child = spawn(process.execPath, scriptArgs(wrapperPath, 'update'), {
     env: { ...process.env, PI_LAUNCH_REAL_PI: executable, PI_LAUNCH_CACHE_DIR: join(root, 'cache') }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
@@ -183,4 +186,41 @@ test('installed Pi integration preserves global and project comments under real 
   assert.match(readFileSync(globalFile, 'utf8'), /"light"/);
   assert.match(readFileSync(projectFile, 'utf8'), /\/\* project \*\//);
   assert.match(readFileSync(projectFile, 'utf8'), /example\.ts/);
+});
+
+test('shim forwards arguments, handles bypass, and routes pi launch / pi-launch commands', t => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-launch-shim-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const src = join(root, 'src');
+  const prefix = join(root, 'prefix');
+  const piDist = join(prefix, 'install/global/node_modules/@earendil-works/pi-coding-agent/dist/bun');
+  mkdirSync(join(src, 'bin'), { recursive: true }); mkdirSync(piDist, { recursive: true });
+  const report = name => `console.log(JSON.stringify({ ran: ${JSON.stringify(name)}, args: process.argv.slice(2), bun: process.env.BUN_INSTALL ?? null }));`;
+  writeFileSync(join(src, 'bin/pi.mjs'), report('wrapper'));
+  writeFileSync(join(piDist, 'cli.js'), report('bypass'));
+  writeFileSync(join(src, 'install.sh'), 'printf \'{"ran":"install.sh","args":"%s","dir":"%s"}\\n\' "$*" "$PI_LAUNCH_DIR"\n');
+  for (const name of ['pi', 'pi-launch']) writeFileSync(join(root, name), shimScript({ prefix, src }), { mode: 0o755 });
+  const env = { ...process.env, PI_LAUNCH_BYPASS: '', BUN_INSTALL: '' };
+  delete env.BUN_INSTALL; delete env.PI_LAUNCH_BYPASS;
+  const run = (name, args, extra = {}) => {
+    const result = spawnSync(join(root, name), args, { encoding: 'utf8', env: { ...env, ...extra } });
+    return { status: result.status, out: result.stdout ? JSON.parse(result.stdout) : null, err: result.stderr };
+  };
+  assert.deepEqual(run('pi', ['--', 'a b', '', '--print', '--']).out, { ran: 'wrapper', args: ['--', 'a b', '', '--print', '--'], bun: null });
+  assert.deepEqual(run('pi', []).out.args, []);
+  assert.deepEqual(run('pi', ['--bypass', '--', 'x']).out, { ran: 'bypass', args: ['--', 'x'], bun: null });
+  assert.deepEqual(run('pi', ['--bypass', 'update']).out, { ran: 'bypass', args: ['update'], bun: prefix });
+  assert.deepEqual(run('pi', ['--version'], { PI_LAUNCH_BYPASS: '1' }).out.ran, 'bypass');
+  for (const [name, args, expected] of [
+    ['pi', ['launch', 'update'], ''],
+    ['pi', ['launch', 'uninstall', '--no-restore'], '--uninstall --no-restore'],
+    ['pi', ['launch', 'remove'], '--uninstall'],
+    ['pi-launch', ['--update'], ''],
+    ['pi-launch', ['--uninstall'], '--uninstall'],
+    ['pi-launch', ['--remove', '--keep-comments'], '--uninstall --keep-comments'],
+  ]) assert.deepEqual(run(name, args).out, { ran: 'install.sh', args: expected, dir: src }, `${name} ${args.join(' ')}`);
+  // Management flags belong to pi-launch only; `pi --update` goes to Pi.
+  assert.equal(run('pi', ['--update']).out.ran, 'wrapper');
+  assert.equal(run('pi', ['launch', 'bogus']).status, 2);
+  assert.equal(spawnSync(join(root, 'pi'), ['launch'], { encoding: 'utf8', env }).status, 0);
 });

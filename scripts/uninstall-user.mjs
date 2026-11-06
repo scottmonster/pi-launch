@@ -1,4 +1,5 @@
-// Reverses install-user: restores a plain global Pi (same version), converts
+// Reverses install-user: restores a plain global Pi (same version; npm if
+// available, else Bun), converts
 // global settings back to plain JSON (with a backup), then removes the shims,
 // the private Pi, the cache and the PATH blocks.
 // Options: --no-restore (don't reinstall plain Pi), --keep-comments (leave settings as-is).
@@ -16,16 +17,18 @@ const shims = ['pi', 'pi-launch'].map(name => join(home, '.local/bin', name));
 // Prefer the prefix recorded in the installed shim over the current environment.
 const recorded = shims.map(shim => { try { return /PI_LAUNCH_PREFIX='([^']*)'/.exec(readFileSync(shim, 'utf8'))?.[1]; } catch { return undefined; } }).find(Boolean);
 const prefix = recorded || privatePrefix();
-const npm = existsSync(join(dirname(process.execPath), 'npm')) ? join(dirname(process.execPath), 'npm') : 'npm';
+const hasNpm = spawnSync('sh', ['-c', 'command -v npm'], { stdio: 'ignore' }).status === 0;
 
 let version = 'latest';
 try { version = findPiRoot(findRealPi({ override: '', prefix })).version; } catch { /* no private install */ }
 
 // 1. Restore plain Pi first; if this fails, nothing has been removed yet.
 if (restore) {
-  console.log(`$ npm install -g ${PACKAGE}@${version}`);
-  const env = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}` };
-  const result = spawnSync(npm, ['install', '-g', `${PACKAGE}@${version}`], { stdio: 'inherit', env });
+  const [command, ...args] = hasNpm
+    ? ['npm', 'install', '-g', '--ignore-scripts', `${PACKAGE}@${version}`]
+    : [process.execPath, 'install', '-g', '--ignore-scripts', `${PACKAGE}@${version}`];
+  console.log(`$ ${command} ${args.join(' ')}`);
+  const result = spawnSync(command, args, { stdio: 'inherit' });
   if (result.status !== 0) throw new Error('Reinstalling plain Pi failed; nothing was removed. Retry, or use --no-restore.');
 }
 
