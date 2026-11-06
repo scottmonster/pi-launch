@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { assertCompatible, findPiRoot, findRealPi, wrapperPath } from '../launcher.mjs';
+import { assertCompatible, findOtherPis, findPiRoot, findRealPi, isPiLaunch, shimMarker, wrapperPath } from '../launcher.mjs';
 import { installSettingsComments } from '../settings-comments.mjs';
 import { ensureCompatible, installationFingerprint } from '../compatibility.mjs';
 
@@ -22,17 +22,24 @@ function fixture(t) {
   return { root, executable };
 }
 
-test('discovers real Pi after any wrapper aliases and rejects recursive overrides', t => {
+test('uses the private Pi install, detects other Pis on PATH, and rejects recursion', t => {
   const { root, executable } = fixture(t);
-  const first = join(root, 'wrapper-bin');
-  const second = join(root, 'real-bin');
-  mkdirSync(first); mkdirSync(second);
-  symlinkSync(wrapperPath, join(first, 'pi'));
-  symlinkSync(executable, join(second, 'pi'));
-  assert.equal(findRealPi({ path: [first, second].join(delimiter), override: '' }), executable);
+  const prefix = join(root, 'prefix');
+  const wrapperBin = join(root, 'wrapper-bin');
+  const otherBin = join(root, 'other-bin');
+  mkdirSync(join(prefix, 'bin'), { recursive: true }); mkdirSync(wrapperBin); mkdirSync(otherBin);
+  assert.throws(() => findRealPi({ override: '', prefix }), /not installed/);
+  symlinkSync(executable, join(prefix, 'bin/pi'));
+  assert.equal(findRealPi({ override: '', prefix }), executable);
   assert.deepEqual(findPiRoot(executable), { root, version: '1.4.0' });
-  assert.throws(() => findRealPi({ override: join(first, 'pi') }), /itself/);
-  assert.throws(() => findRealPi({ path: first, override: '' }), /Cannot find/);
+  symlinkSync(wrapperPath, join(wrapperBin, 'pi'));
+  writeFileSync(join(wrapperBin, 'pi-launch'), `#!/bin/sh\n${shimMarker}\nexec node x "$@"\n`, { mode: 0o755 });
+  symlinkSync(executable, join(otherBin, 'pi'));
+  assert.ok(isPiLaunch(join(wrapperBin, 'pi')) && isPiLaunch(join(wrapperBin, 'pi-launch')));
+  assert.deepEqual(findOtherPis([wrapperBin, otherBin, otherBin].join(delimiter)), [executable]);
+  assert.deepEqual(findOtherPis(wrapperBin), []);
+  assert.throws(() => findRealPi({ override: join(wrapperBin, 'pi') }), /itself/);
+  assert.throws(() => findRealPi({ override: join(wrapperBin, 'pi-launch') }), /itself/);
 });
 
 test('new versions are accepted when behavior passes, and successful checks are cached', t => {
@@ -150,7 +157,10 @@ test('update supervisor preserves termination signals', { timeout: 10000 }, asyn
 test('installed Pi integration preserves global and project comments under real locks', async t => {
   let installation;
   try { installation = findPiRoot(findRealPi()); }
-  catch { t.skip('No npm Pi available'); return; }
+  catch {
+    try { installation = findPiRoot(findOtherPis()[0]); }
+    catch { t.skip('No npm Pi available'); return; }
+  }
   assertCompatible(installation);
   const { FileSettingsStorage, SettingsManager } = await import(pathToFileURL(join(installation.root, 'dist/core/settings-manager.js')).href);
   installSettingsComments(FileSettingsStorage);
